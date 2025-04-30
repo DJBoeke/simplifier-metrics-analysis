@@ -4,7 +4,8 @@ import numpy as np
 import plotly.express as px
 import pycountry
 import seaborn as sns
-import matplotlib.pyplot as plt
+
+from datetime import timedelta
 
 plt.style.use('seaborn-v0_8-whitegrid')
 font_size = 14
@@ -17,6 +18,25 @@ df_public_packages = pd.read_csv(
            "CanonicalState", "LastUpdate", "JurisdictionCode", "JurisdictionSystem", "InMainFeed", "ProjectId"],
     index_col=False
 )
+
+# --- Load Data ---
+df_public_packages = pd.read_csv(
+    r"C:\Users\Gebruiker\OneDrive - Firely\SRP\Data analyse\Simplifier\publicPackages.csv",
+    names=["Id", "PackageEntryId", "PackageName", "Version", "ReleaseDate", "ReleaseNotes", "Description",
+           "Prerelease", "FhirVersion", "Unlisted", "Complete", "ShaSum", "Source", "PackageCanonical",
+           "CanonicalState", "LastUpdate", "JurisdictionCode", "JurisdictionSystem", "InMainFeed", "ProjectId"],
+    index_col=False
+)
+
+total_unique_packages = df_public_packages["PackageName"].nunique()
+
+total_unique_projects = df_public_packages["ProjectId"].nunique()
+
+total_unique_jurisdictions = df_public_packages["JurisdictionCode"].nunique()
+
+print(f"Total unique packages: {total_unique_packages}")
+print(f"Total unique projects: {total_unique_projects}")
+print(f"Total jurisdictions represented: {total_unique_jurisdictions}")
 
 df_package_dependencies = pd.read_csv(
     r"C:\Users\Gebruiker\OneDrive - Firely\SRP\Data analyse\Simplifier\packageDependencies.csv",
@@ -43,9 +63,6 @@ df_views_packages['Date_2'] = pd.to_datetime(df_views_packages['Date_2'], errors
 df_views_packages['Date'] = df_views_packages['Date_2'].dt.date
 df_views_packages.drop(columns=['Date_2', 'UserId', 'Action'], inplace=True)
 
-print("Before script cleaning:", df_public_packages["PackageName"].dropna().nunique())
-
-# --- Clean Data ---
 replacements = {
     'urn:iso:std:iso:3166:GB-ENG': 'GB',
     'urn:iso:std:iso:3166:-2:GB-ENG': 'GB',
@@ -54,8 +71,82 @@ replacements = {
 }
 
 df_public_packages['JurisdictionCode'] = df_public_packages['JurisdictionCode'].replace(replacements)
-df_public_packages = df_public_packages.dropna(subset=["JurisdictionCode"])
+
+# --- Adoption World Heatmap ---
+
+# Aggregate all metrics by JurisdictionCode
+fhir_adoption_df = df_public_packages.groupby("JurisdictionCode").agg(
+    TotalProjects=("ProjectId", "nunique"),
+    TotalPackages=("PackageName", "nunique")
+).reset_index()
+
+# Replace NaNs with 0s
+fhir_adoption_df.fillna(0, inplace=True)
+
+def alpha2_to_alpha3_safe(code):
+    if isinstance(code, str) and len(code) == 3 and code in [c.alpha_3 for c in pycountry.countries]:
+        return code  # already ISO-3
+    try:
+        return pycountry.countries.get(alpha_2=code).alpha_3
+    except:
+        return None
+
+fhir_adoption_df["JurisdictionCode"] = fhir_adoption_df["JurisdictionCode"].apply(alpha2_to_alpha3_safe)
+fhir_adoption_df.dropna(subset=["JurisdictionCode"], inplace=True)
+
+if "GRL" not in fhir_adoption_df["JurisdictionCode"].values:
+    fhir_adoption_df = pd.concat([
+        fhir_adoption_df,
+        pd.DataFrame([{
+            "JurisdictionCode": "GRL",
+            "TotalProjects": 0,
+            "TotalPackages": 1,  # Force at least one package
+            "TotalDownloads": 0,
+            "TotalViews": 0
+        }])
+    ], ignore_index=True)
+
+# Create a new binary column: is the country active? (1 = active, 0 = not active)
+fhir_adoption_df["IsActive"] = fhir_adoption_df["TotalPackages"].apply(lambda x: 1 if x > 0 else 0)
+
+# Total number of active jurisdictions
+total_active = fhir_adoption_df["IsActive"].sum()
+print(f"Total active jurisdictions: {total_active}")
+
+# Define a custom color scale for binary values
+binary_colorscale = [
+    [0, "white"],   # 0 = inactive -> white
+    [1, "#922b21"]  # 1 = active -> your red color
+]
+
+# Plot the binary active map
+fig = px.choropleth(
+    fhir_adoption_df,
+    locations="JurisdictionCode",
+    locationmode="ISO-3",
+    color="IsActive",
+    hover_name="JurisdictionCode",
+    color_continuous_scale=binary_colorscale,
+    range_color=(0,1),
+    title=f"FHIR Active Jurisdictions ({total_active} active)",
+    projection="natural earth",
+)
+
+fig.update_layout(
+    geo=dict(showframe=False, showcoastlines=True),
+    margin={"r":0,"t":50,"l":0,"b":0},
+    coloraxis_showscale=False  # Hide colorbar since it's binary
+)
+
+fig.show()
+
+print("Before script cleaning:", df_public_packages["PackageName"].dropna().nunique())
+
+# --- Clean Data ---
+
 df_public_packages = df_public_packages[~df_public_packages["JurisdictionCode"].isin(["001", "1"])]
+df_public_packages = df_public_packages.dropna(subset=["JurisdictionCode"])
+
 df_public_packages = df_public_packages[
     (df_public_packages["Unlisted"] != 1) &
     (df_public_packages["Complete"] != 0) &
@@ -121,20 +212,20 @@ print("After manual cleaning (merged_downloads_df):", merged_downloads_df["Packa
 print("After manual cleaning (merged_package_dependencies):", merged_package_dependencies["TargetPackageName"].dropna().nunique())
 print("After manual cleaning (merged_views_df):", merged_views_df["PackageName"].dropna().nunique())
 
-def list_all_packages(df_packages):
-    df_packages["PackageName"] = df_packages["PackageName"].str.lower()
-    return df_packages["PackageName"].unique()
+# def list_all_packages(df_packages):
+#     df_packages["PackageName"] = df_packages["PackageName"].str.lower()
+#     return df_packages["PackageName"].unique()
 
-# Get all packages
-all_packages = list_all_packages(merged_downloads_df)
+# # Get all packages
+# all_packages = list_all_packages(merged_downloads_df)
 
-# Sorting the list of unique package names alphabetically
-sorted_packages = sorted(all_packages)
+# # Sorting the list of unique package names alphabetically
+# sorted_packages = sorted(all_packages)
 
-# # Print sorted packages
-# print("Sorted packages:")
-# for pkg in sorted_packages:
-#     print(pkg)
+# # # Print sorted packages
+# # print("Sorted packages:")
+# # for pkg in sorted_packages:
+# #     print(pkg)
 
 # --- Adoption Metrics ---
 
@@ -143,7 +234,6 @@ def plot_top5_bar_with_percentages(
     value_col,
     metric_name,
     color,
-    title,
     ylabel,
     fontsize=14,
     height_threshold=10
@@ -165,7 +255,6 @@ def plot_top5_bar_with_percentages(
             ax.text(bar.get_x() + bar.get_width()/2, height + 2, f"{row['Percentage']:.1f}%",
                     ha='center', va='bottom', color='black', fontsize=fontsize-2)
 
-    ax.set_title(title, fontsize=fontsize+2, fontweight='bold')
     ax.set_xlabel("Jurisdiction Code", fontsize=fontsize)
     ax.set_ylabel(ylabel, fontsize=fontsize)
     ax.tick_params(axis='x', rotation=45, labelsize=fontsize-2)
@@ -200,8 +289,7 @@ plot_top5_bar_with_percentages(
     df_top5=top_unique_packages_df,
     value_col="UniquePackages",
     metric_name="Unique Packages",
-    color="#fcf403",
-    title="Top 5 Jurisdictions by Unique Packages",
+    color="#9206c9",
     ylabel="Number of Unique Packages"
 )
 
@@ -222,8 +310,7 @@ plot_top5_bar_with_percentages(
     df_top5=top_projects,
     value_col="TotalProjects",
     metric_name="Unique Projects",
-    color="#03fcdf",
-    title="Top 5 Jurisdictions by Unique Projects",
+    color="#04b347",
     ylabel="Number of Unique Projects"
 )
 
@@ -255,7 +342,6 @@ plot_top5_bar_with_percentages(
     value_col="TotalDownloads",
     metric_name="Downloads",
     color="#1f77b4",
-    title="Top 5 Jurisdictions by Downloads",
     ylabel="Total Downloads"
 )
 
@@ -270,7 +356,6 @@ plot_top5_bar_with_percentages(
     value_col="TotalViews",
     metric_name="Views",
     color="#ff7f0e",
-    title="Top 5 Jurisdictions by Views",
     ylabel="Total Views"
 )
 
@@ -298,73 +383,8 @@ plot_top5_bar_with_percentages(
     value_col="TotalDependencies",
     metric_name="Package Dependencies",
     color="#d62728",
-    title="Top 5 Jurisdictions by Package Dependencies",
     ylabel="Total Dependencies"
 )
-
-# --- Adoption World Heatmap ---
-
-#Downloads and Views
-downloads = merged_downloads_df.groupby("JurisdictionCode").size().reset_index(name="TotalDownloads")
-views = merged_views_df.groupby("JurisdictionCode").size().reset_index(name="TotalViews")
-dependencies = package_dependencies_df.groupby("JurisdictionCode").size().reset_index(name="TotalDependencies")
-
-# Aggregate all metrics by JurisdictionCode
-fhir_adoption_df = df_public_packages.groupby("JurisdictionCode").agg(
-    TotalProjects=("ProjectId", "nunique"),
-    TotalPackages=("PackageName", "nunique")
-).reset_index()
-
-# Merge all into one
-fhir_adoption_df = fhir_adoption_df.merge(downloads, on="JurisdictionCode", how="left")
-fhir_adoption_df = fhir_adoption_df.merge(views, on="JurisdictionCode", how="left")
-fhir_adoption_df = fhir_adoption_df.merge(dependencies, on="JurisdictionCode", how="left")
-
-# Replace NaNs with 0s
-fhir_adoption_df.fillna(0, inplace=True)
-
-def alpha2_to_alpha3(code):
-    try:
-        return pycountry.countries.get(alpha_2=code).alpha_3
-    except:
-        return None
-
-fhir_adoption_df["JurisdictionCode"] = fhir_adoption_df["JurisdictionCode"].apply(alpha2_to_alpha3)
-fhir_adoption_df.dropna(subset=["JurisdictionCode"], inplace=True)
-
-# Create a new binary column: is the country active? (1 = active, 0 = not active)
-fhir_adoption_df["IsActive"] = fhir_adoption_df["TotalPackages"].apply(lambda x: 1 if x > 0 else 0)
-
-# Total number of active jurisdictions
-total_active = fhir_adoption_df["IsActive"].sum()
-print(f"Total active jurisdictions: {total_active}")
-
-# Define a custom color scale for binary values
-binary_colorscale = [
-    [0, "white"],   # 0 = inactive -> white
-    [1, "#922b21"]  # 1 = active -> your red color
-]
-
-# Plot the binary active map
-fig = px.choropleth(
-    fhir_adoption_df,
-    locations="JurisdictionCode",
-    locationmode="ISO-3",
-    color="IsActive",
-    hover_name="JurisdictionCode",
-    color_continuous_scale=binary_colorscale,
-    range_color=(0,1),
-    title=f"FHIR Active Jurisdictions ({total_active} active)",
-    projection="natural earth",
-)
-
-fig.update_layout(
-    geo=dict(showframe=False, showcoastlines=True),
-    margin={"r":0,"t":50,"l":0,"b":0},
-    coloraxis_showscale=False  # Hide colorbar since it's binary
-)
-
-fig.show()
 
 # --- Adoption Figure Heatmap ---
 
@@ -484,7 +504,7 @@ def plot_single_metric_trend(
     plt.tight_layout()
     plt.show()
 
-# Plot only Downloads
+
 plot_single_metric_trend(
     merged_downloads_df,
     merged_views_df,
@@ -560,7 +580,7 @@ def compare_single_metric_trends(
     if event_dates and event_labels:
         for date, label_text in zip(event_dates, event_labels):
             ax.axvline(pd.to_datetime(date), color='red', linestyle='--', alpha=0.6)
-            ax.text(pd.to_datetime(date), ax.get_ylim()[1], label_text, rotation=90, fontsize=10, verticalalignment='top')
+            ax.text(pd.to_datetime(date) + timedelta(days=2), ax.get_ylim()[1], label_text, rotation=90, fontsize=10, verticalalignment='top')
 
     title = f"Comparative {metric.capitalize()} Trends"
     if package_name:
@@ -581,8 +601,34 @@ compare_single_metric_trends(
     jurisdictions=["DE", "US", "CA", "GB", "NL"],
     metric="downloads",
     package_name=None,
-    event_dates=["2024-06-12"],
-    event_labels=["FHIR DevDays"]
+    event_dates = [
+    "2023-12-01",  # TEFCA Network Launch (QHINs Live)
+    "2023-12-15",  # ONC HTI-1 Final Rule
+    "2024-01-01",  # Germany Mandates E-Prescriptions (E-Rezept)
+    "2024-01-17",  # CMS Final Rule on FHIR APIs for Prior Authorization
+    "2024-02-02",  # Germany Digital Health Act (DigiG) Approved
+    "2024-03-26",  # Germany Digital Health Act (DigiG) In Force
+    "2024-04-24",  # EU Parliament Approves European Health Data Space (EHDS)
+    "2024-06-12",  # Canada Bill C-72 Introduced (Connected Care for Canadians Act)
+    "2024-09-15",  # US Federal FHIR Action Plan Draft Released
+    "2024-10-01",  # UK Data Protection & Digital Info Bill – Interop Provisions
+    "2025-01-15",  # Germany Opt-Out Electronic Health Record Begins
+    "2025-04-01"   # UK NHS Interoperability Mandate & EPR Reforms (Preliminary)
+    ],
+    event_labels = [
+    "TEFCA Go-Live (US)",
+    "ONC HTI-1 Rule (US)",
+    "(E-Rezept) Launch (DE)",
+    "CMS FHIR API Rule (US)",
+    "Digital Health Act (DigiG) Approved (DE)",
+    "Digital Health Act (DigiG) In Force",
+    "EHDS Approved (DE/NL)",
+    "Connected Care Bill C-72 Tabled (CA)",
+    "ONC/ASTP Federal FHIR Plan (US)",
+    "DPDI Interop Mandate (UK)",
+    "ePA Opt-Out Starts (DE)",
+    "NHS Interop Mandate (UK)"
+    ] 
 )
 
 # Compare Views
@@ -592,8 +638,34 @@ compare_single_metric_trends(
     jurisdictions=["DE", "US", "CA", "GB", "NL"],
     metric="views",
     package_name=None,
-    event_dates=["2024-06-12"],
-    event_labels=["FHIR DevDays"]
+    event_dates = [
+    "2023-12-01",  # TEFCA Network Launch (QHINs Live)
+    "2023-12-15",  # ONC HTI-1 Final Rule
+    "2024-01-01",  # Germany Mandates E-Prescriptions (E-Rezept)
+    "2024-01-17",  # CMS Final Rule on FHIR APIs for Prior Authorization
+    "2024-02-02",  # Germany Digital Health Act (DigiG) Approved
+    "2024-03-26",  # Germany Digital Health Act (DigiG) In Force
+    "2024-04-24",  # EU Parliament Approves European Health Data Space (EHDS)
+    "2024-06-12",  # Canada Bill C-72 Introduced (Connected Care for Canadians Act)
+    "2024-09-15",  # US Federal FHIR Action Plan Draft Released
+    "2024-10-01",  # UK Data Protection & Digital Info Bill – Interop Provisions
+    "2025-01-15",  # Germany Opt-Out Electronic Health Record Begins
+    "2025-04-01"   # UK NHS Interoperability Mandate & EPR Reforms (Preliminary)
+    ],
+    event_labels = [
+    "TEFCA Go-Live (US)",
+    "ONC HTI-1 Rule (US)",
+    "(E-Rezept) Launch (DE)",
+    "CMS FHIR API Rule (US)",
+    "Digital Health Act (DigiG) Approved (DE)",
+    "Digital Health Act (DigiG) In Force",
+    "EHDS Approved (DE/NL)",
+    "Connected Care Bill C-72 Tabled (CA)",
+    "ONC/ASTP Federal FHIR Plan (US)",
+    "DPDI Interop Mandate (UK)",
+    "ePA Opt-Out Starts (DE)",
+    "NHS Interop Mandate (UK)"
+    ]
 )
 
 # --- Aggregate metrics for global maximums---
@@ -641,30 +713,30 @@ def plot_adoption_metric(df, jurisdiction, metric, color, global_max):
     plt.tight_layout()
     plt.show()
 
-# Germany
-plot_adoption_metric(merged_downloads_df, 'DE', 'TotalDownloads', '#1f77b4', global_max_downloads)
-plot_adoption_metric(merged_views_df, 'DE', 'TotalViews', '#2ca02c', global_max_views)
-plot_adoption_metric(package_dependencies_df, 'DE', 'DependencyCount', '#d62728', global_max_dependencies)
+# # Germany
+# plot_adoption_metric(merged_downloads_df, 'DE', 'TotalDownloads', '#1f77b4', global_max_downloads)
+# plot_adoption_metric(merged_views_df, 'DE', 'TotalViews', '#2ca02c', global_max_views)
+# plot_adoption_metric(package_dependencies_df, 'DE', 'DependencyCount', '#d62728', global_max_dependencies)
 
-# USA
-plot_adoption_metric(merged_downloads_df, 'US', 'TotalDownloads', '#1f77b4', global_max_downloads)
-plot_adoption_metric(merged_views_df, 'US', 'TotalViews', '#2ca02c', global_max_views)
-plot_adoption_metric(package_dependencies_df, 'US', 'DependencyCount', '#d62728', global_max_dependencies)
+# # USA
+# plot_adoption_metric(merged_downloads_df, 'US', 'TotalDownloads', '#1f77b4', global_max_downloads)
+# plot_adoption_metric(merged_views_df, 'US', 'TotalViews', '#2ca02c', global_max_views)
+# plot_adoption_metric(package_dependencies_df, 'US', 'DependencyCount', '#d62728', global_max_dependencies)
 
-# Canada
-plot_adoption_metric(merged_downloads_df, 'CA', 'TotalDownloads', '#1f77b4', global_max_downloads)
-plot_adoption_metric(merged_views_df, 'CA', 'TotalViews', '#2ca02c', global_max_views)
-plot_adoption_metric(package_dependencies_df, 'CA', 'DependencyCount', '#d62728', global_max_dependencies)
+# # Canada
+# plot_adoption_metric(merged_downloads_df, 'CA', 'TotalDownloads', '#1f77b4', global_max_downloads)
+# plot_adoption_metric(merged_views_df, 'CA', 'TotalViews', '#2ca02c', global_max_views)
+# plot_adoption_metric(package_dependencies_df, 'CA', 'DependencyCount', '#d62728', global_max_dependencies)
 
-# Great Britain
-plot_adoption_metric(merged_downloads_df, 'GB', 'TotalDownloads', '#1f77b4', global_max_downloads)
-plot_adoption_metric(merged_views_df, 'GB', 'TotalViews', '#2ca02c', global_max_views)
-plot_adoption_metric(package_dependencies_df, 'GB', 'DependencyCount', '#d62728', global_max_dependencies)
+# # Great Britain
+# plot_adoption_metric(merged_downloads_df, 'GB', 'TotalDownloads', '#1f77b4', global_max_downloads)
+# plot_adoption_metric(merged_views_df, 'GB', 'TotalViews', '#2ca02c', global_max_views)
+# plot_adoption_metric(package_dependencies_df, 'GB', 'DependencyCount', '#d62728', global_max_dependencies)
 
-# Netherlands
-plot_adoption_metric(merged_downloads_df, 'NL', 'TotalDownloads', '#1f77b4', global_max_downloads)
-plot_adoption_metric(merged_views_df, 'NL', 'TotalViews', '#2ca02c', global_max_views)
-plot_adoption_metric(package_dependencies_df, 'NL', 'DependencyCount', '#d62728', global_max_dependencies)
+# # Netherlands
+# plot_adoption_metric(merged_downloads_df, 'NL', 'TotalDownloads', '#1f77b4', global_max_downloads)
+# plot_adoption_metric(merged_views_df, 'NL', 'TotalViews', '#2ca02c', global_max_views)
+# plot_adoption_metric(package_dependencies_df, 'NL', 'DependencyCount', '#d62728', global_max_dependencies)
 
 # --- Package Metric Comparison ---
 
@@ -694,7 +766,6 @@ def plot_top_metric(df, metric, title, color):
     plt.tight_layout()
     plt.show()
 
-#Now generate the four plots
-plot_top_metric(package_metrics, "NormDownloads", "Normalized Downloads", "#1f77b4")
-plot_top_metric(package_metrics, "NormViews", "Normalized Views", "#2ca02c")
-plot_top_metric(package_metrics, "NormDependencies", "Normalized Dependencies", "#d62728")
+# plot_top_metric(package_metrics, "NormDownloads", "Normalized Downloads", "#1f77b4")
+# plot_top_metric(package_metrics, "NormViews", "Normalized Views", "#2ca02c")
+# plot_top_metric(package_metrics, "NormDependencies", "Normalized Dependencies", "#d62728")
